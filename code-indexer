@@ -1,0 +1,23 @@
+#!/bin/bash
+# Цей скрипт запускає code-indexer використовуючи його власне віртуальне середовище
+# Встановіть цей файл у ваш PATH (наприклад, ln -s $(pwd)/code-indexer ~/bin/code-indexer)
+
+# Визначаємо папку, де знаходиться цей скрипт (навіть якщо це симлінк)
+SOURCE=${BASH_SOURCE[0]}
+while [ -L "$SOURCE" ]; do # resolve $SOURCE until the file is no longer a symlink
+  DIR=$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )
+  SOURCE=$(readlink "$SOURCE")
+  [[ $SOURCE != /* ]] && SOURCE=$DIR/$SOURCE # if $SOURCE was a relative symlink, we need to resolve it relative to the path where the symlink file was located
+done
+PROJECT_DIR=$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )
+
+PYTHON_EXEC="$PROJECT_DIR/.venv/bin/python"
+MAIN_SCRIPT="$PROJECT_DIR/main.py"
+
+if [ ! -f "$PYTHON_EXEC" ]; then
+    echo "Error: Virtual environment not found at $PROJECT_DIR/.venv"
+    echo "Please run 'python3 -m venv .venv' and 'pip install -r requirements.txt' in the project directory."
+    exit 1
+fi
+
+exec "$PYTHON_EXEC" "$MAIN_SCRIPT" "$@"

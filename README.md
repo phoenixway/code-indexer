@@ -31,9 +31,13 @@ A local, AI-powered tool for indexing, summarizing, and semantically searching c
    # .\.venv\Scripts\activate  # On Windows
    ```
 
-3. **Initialize submodules (for Tree-sitter grammars):**
+3. **Initialize Tree-sitter grammars:**
+   The project requires the source code of Tree-sitter grammars in the `vendor/` directory. If they are missing, clone them manually:
    ```bash
-   git submodule update --init --recursive
+   mkdir -p vendor
+   git clone https://github.com/tree-sitter/tree-sitter-python vendor/tree-sitter-python
+   git clone https://github.com/fwcd/tree-sitter-kotlin vendor/tree-sitter-kotlin
+   git clone https://github.com/tree-sitter/tree-sitter-go vendor/tree-sitter-go
    ```
 
 4. **Install Python dependencies:**

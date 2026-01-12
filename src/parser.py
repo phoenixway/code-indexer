@@ -5,8 +5,9 @@ from .schema import CodeEntity, EntitySummary
 
 class CodeParser:
     def __init__(self):
-        # Шлях до скомпільованого файлу
-        lib_path = 'build/my-languages.so'
+        # Шлях до скомпільованого файлу (абсолютний, відносно кореня проекту)
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        lib_path = os.path.join(base_dir, 'build', 'my-languages.so')
         
         if not os.path.exists(lib_path):
             raise FileNotFoundError("Run 'python3 build_langs.py' first!")

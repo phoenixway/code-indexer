@@ -8,4 +8,5 @@ ollama
 argparse
 tqdm
 pydantic
-# onnxruntime  # Temporarily commented out as it failed to install
+pyyaml
+# onnxruntime

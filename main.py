@@ -139,6 +139,17 @@ def cmd_status(args):
     print(f"  High (Human):   {counts['high']}")
     print(f"  Medium (LLM):   {counts['medium']}")
     print(f"  Low (Raw):      {counts['low']}")
+    
+    print("\n--- Recommended Next Step ---")
+    if len(entities) == 0:
+        print("Run 'scan <path>' to index your codebase.")
+    elif counts['low'] > 0:
+        print(f"Run 'summarize' to analyze {counts['low']} new entities.")
+        print("Or run 'embed' if you want to skip AI analysis for now.")
+    elif not os.path.exists(os.path.join(storage.INDEX_DIR, "embeddings.npy")):
+        print("Run 'embed' to build the search index.")
+    else:
+        print("Index is up to date! Try 'search \"your query\"'.")
 
 def main():
     parser = argparse.ArgumentParser(prog="code-indexer")

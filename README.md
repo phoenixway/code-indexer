@@ -51,6 +51,15 @@ A local, AI-powered tool for indexing, summarizing, and semantically searching c
    python3 build_langs.py
    ```
 
+## Workflow
+
+Follow this sequence to fully index your codebase:
+
+1.  **Scan (`scan`)**: Parse the codebase to identify functions and classes.
+2.  **Analyze (`intents` & `summarize`)**: Use LLM to understand what the code does.
+3.  **Embed (`embed`)**: Create vector embeddings for semantic search.
+4.  **Search (`search`)**: Query your codebase.
+
 ## Usage
 
 The tool is controlled via the `main.py` CLI.
@@ -80,6 +89,16 @@ Search your codebase using natural language.
 python3 main.py search "How do we handle database connections?"
 ```
 
+## Model Setup (ONNX)
+
+For running the tool on devices with limited resources (like Android/Termux), you should use the ONNX version of the embedding model.
+
+1.  **Download the pre-converted model:**
+    ```bash
+    python3 download_onnx.py
+    ```
+    This script downloads a compatible ONNX version of `all-MiniLM-L6-v2` from Hugging Face and saves it to `models/all-MiniLM-L6-v2-onnx`.
+
 ## Project Structure
 
 - `src/parser.py`: Handles code parsing using Tree-sitter and custom queries.
@@ -87,6 +106,33 @@ python3 main.py search "How do we handle database connections?"
 - `src/storage.py`: Manages the database/storage of indexed code.
 - `build_langs.py`: Script to compile Tree-sitter grammars into a shared object.
 - `vendor/`: Contains the source code for Tree-sitter language grammars.
+
+## Cross-platform Usage (Desktop & Mobile)
+
+The tool supports different AI backends to run efficiently on various hardware.
+
+### Desktop (Linux)
+Uses **PyTorch** and `sentence-transformers` for maximum performance.
+- **Requirements:** `pip install sentence-transformers torch`
+- **Config (`~/.config/code-indexer/config.yaml`):**
+  ```yaml
+  models:
+    provider: torch
+    embedding: all-MiniLM-L6-v2
+  ```
+
+### Mobile (Android via Termux)
+Uses **ONNX Runtime** for low resource consumption.
+- **Requirements:** `pip install onnxruntime transformers`
+- **Setup:**
+  1. Export the model to ONNX on a desktop using `python3 export_to_onnx.py`.
+  2. Transfer the `models/all-MiniLM-L6-v2-onnx` folder to your phone.
+- **Config (`~/.config/code-indexer/config.yaml`):**
+  ```yaml
+  models:
+    provider: onnx
+    embedding: /sdcard/path/to/models/all-MiniLM-L6-v2-onnx
+  ```
 
 ## Troubleshooting
 

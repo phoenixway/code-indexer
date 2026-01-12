@@ -1,0 +1,12 @@
+numpy
+tree-sitter
+tree-sitter-python
+tree-sitter-kotlin
+tree-sitter-go
+ollama
+argparse
+tqdm
+pydantic
+pyyaml
+onnxruntime
+transformers

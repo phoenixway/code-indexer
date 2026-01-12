@@ -123,10 +123,29 @@ Uses **PyTorch** and `sentence-transformers` for maximum performance.
 
 ### Mobile (Android via Termux)
 Uses **ONNX Runtime** for low resource consumption.
-- **Requirements:** `pip install onnxruntime transformers`
-- **Setup:**
-  1. Export the model to ONNX on a desktop using `python3 export_to_onnx.py`.
-  2. Transfer the `models/all-MiniLM-L6-v2-onnx` folder to your phone.
+
+**1. Installation:**
+Termux requires compiling some libraries (like `tokenizers`) from source, which needs Rust and C compilers.
+
+```bash
+# Install system dependencies
+pkg install rust clang binutils python-numpy
+
+# Set up environment for compilation (bash/zsh)
+export CARGO_BUILD_TARGET=aarch64-linux-android
+export ANDROID_API_LEVEL=24 
+
+# Set up environment for compilation (fish)
+set -gx CARGO_BUILD_TARGET aarch64-linux-android
+set -gx ANDROID_API_LEVEL 24
+
+# Install Python dependencies using the Android-specific file
+# (This excludes 'sentence-transformers' which is too heavy)
+pip install -r requirements-android.txt
+```
+
+**2. Model Setup:**
+- Transfer the `models/all-MiniLM-L6-v2-onnx` folder (generated on desktop) to your phone.
 - **Config (`~/.config/code-indexer/config.yaml`):**
   ```yaml
   models:

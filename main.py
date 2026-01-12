@@ -74,6 +74,8 @@ def cmd_summarize(args):
 
     storage.save_entities(entities)
     print("✅ Summarization complete.")
+    print("\n--- Next Recommended Step ---")
+    print("Run 'code-indexer embed' to update the search index with these new descriptions.")
 
 def cmd_embed(args):
     print("Geometry is everything. Embedding data...")

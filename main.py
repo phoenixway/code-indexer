@@ -22,6 +22,10 @@ def cmd_scan(args):
     # В канонічному flow ми перезаписуємо scan, бо human-edits повинні бути в коді
     storage.save_entities(new_entities)
     print(f"✅ Scanned {len(new_entities)} entities. Saved to entities.json")
+    print("\n--- Next Recommended Step ---")
+    print("1. Run 'code-indexer intents' if you have documentation in docs/intents/.")
+    print("2. Run 'code-indexer summarize' to generate AI descriptions.")
+    print("3. Run 'code-indexer embed' to create search vectors.")
 
 def cmd_intents(args):
     print("📘 Parsing intents from docs/intents/...")

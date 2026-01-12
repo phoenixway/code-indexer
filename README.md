@@ -99,6 +99,38 @@ For running the tool on devices with limited resources (like Android/Termux), yo
     ```
     This script downloads a compatible ONNX version of `all-MiniLM-L6-v2` from Hugging Face and saves it to `models/all-MiniLM-L6-v2-onnx`.
 
+## Lightweight Search (Search Only)
+
+If you only need to search an existing index (e.g., on a mobile device) without the full indexing pipeline, use the lightweight search script. This avoids heavy dependencies like Tree-sitter or PyTorch.
+
+1.  **Install minimal dependencies:**
+    ```bash
+    pip install -r requirements-search.txt
+    ```
+2.  **Ensure index and model are present:**
+    Copy `.code-index/` and `models/all-MiniLM-L6-v2-onnx/` to your project directory.
+3.  **Search:**
+    ```bash
+    python3 search_index.py "your query"
+    ```
+
+### Making it global (Termux)
+To run the search from any folder:
+1.  Create a link to your `bin` folder:
+    ```bash
+    mkdir -p ~/bin
+    ln -s $(pwd)/search-index ~/bin/search-index
+    ```
+2.  Add `~/bin` to your PATH if not already present.
+    ```bash
+    # Bash/Zsh
+    echo 'export PATH=$HOME/bin:$PATH' >> ~/.bashrc
+    
+    # Fish
+    set -U fish_user_paths $HOME/bin $fish_user_paths
+    ```
+3.  Now you can run `search-index "query"` from anywhere.
+
 ## Project Structure
 
 - `src/parser.py`: Handles code parsing using Tree-sitter and custom queries.
@@ -125,11 +157,16 @@ Uses **PyTorch** and `sentence-transformers` for maximum performance.
 Uses **ONNX Runtime** for low resource consumption.
 
 **1. Installation:**
-Termux requires compiling some libraries (like `tokenizers`) from source, which needs Rust and C compilers.
+Termux requires system-level installation for heavy libraries like ONNX Runtime.
 
 ```bash
-# Install system dependencies
-pkg install rust clang binutils python-numpy
+# Install system dependencies (including ONNX Runtime)
+pkg install rust clang binutils python-numpy python-onnxruntime
+
+# Create virtual environment with access to system packages
+# (Crucial for accessing the installed onnxruntime)
+python3 -m venv --system-site-packages .venv
+source .venv/bin/activate
 
 # Set up environment for compilation (bash/zsh)
 export CARGO_BUILD_TARGET=aarch64-linux-android
@@ -139,8 +176,10 @@ export ANDROID_API_LEVEL=24
 set -gx CARGO_BUILD_TARGET aarch64-linux-android
 set -gx ANDROID_API_LEVEL 24
 
-# Install Python dependencies using the Android-specific file
-# (This excludes 'sentence-transformers' which is too heavy)
+# Edit requirements to remove 'onnxruntime' (since we installed it via pkg)
+sed -i '/onnxruntime/d' requirements-android.txt
+
+# Install Python dependencies
 pip install -r requirements-android.txt
 ```
 

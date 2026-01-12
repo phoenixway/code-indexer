@@ -8,5 +8,5 @@ argparse
 tqdm
 pydantic
 pyyaml
-onnxruntime
+# onnxruntime
 transformers

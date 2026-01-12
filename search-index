@@ -1,0 +1,21 @@
+#!/bin/bash
+# Обгортка для запуску search_index.py з будь-якого місця
+
+# Знаходимо папку скрипта (розв'язуючи симлінки)
+SOURCE=${BASH_SOURCE[0]}
+while [ -L "$SOURCE" ]; do
+  DIR=$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )
+  SOURCE=$(readlink "$SOURCE")
+  [[ $SOURCE != /* ]] && SOURCE=$DIR/$SOURCE
+done
+PROJECT_DIR=$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )
+
+PYTHON_EXEC="$PROJECT_DIR/.venv/bin/python"
+SEARCH_SCRIPT="$PROJECT_DIR/search_index.py"
+
+if [ ! -f "$PYTHON_EXEC" ]; then
+    echo "Error: Virtual environment not found at $PROJECT_DIR/.venv"
+    exit 1
+fi
+
+exec "$PYTHON_EXEC" "$SEARCH_SCRIPT" "$@"

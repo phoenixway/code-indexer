@@ -1,34 +1,18 @@
 import os
-import ctypes
-from tree_sitter import Language, Parser
+from tree_sitter import Language, Parser, Query, QueryCursor
 from .schema import CodeEntity, EntitySummary
 
 class CodeParser:
     def __init__(self):
-        # Шлях до скомпільованого файлу (абсолютний, відносно кореня проекту)
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        lib_path = os.path.join(base_dir, 'build', 'my-languages.so')
+        import tree_sitter_python
+        import tree_sitter_kotlin
+        import tree_sitter_go
         
-        if not os.path.exists(lib_path):
-            raise FileNotFoundError("Run 'python3 build_langs.py' first!")
-
-        # Завантажуємо спільну бібліотеку
-        try:
-            self.lib = ctypes.CDLL(lib_path)
-        except Exception as e:
-            print(f"Error loading {lib_path}: {e}")
-            raise
-
-        # Налаштовуємо типи повернення для функцій мов
-        self.lib.tree_sitter_python.restype = ctypes.c_void_p
-        self.lib.tree_sitter_kotlin.restype = ctypes.c_void_p
-        self.lib.tree_sitter_go.restype = ctypes.c_void_p
-
-        # Завантажуємо мови
+        # Завантажуємо мови через офіційні пакети
         self.LANGUAGES = {
-            ".py": Language(self.lib.tree_sitter_python()),
-            ".kt": Language(self.lib.tree_sitter_kotlin()),
-            ".go": Language(self.lib.tree_sitter_go())
+            ".py": Language(tree_sitter_python.language()),
+            ".kt": Language(tree_sitter_kotlin.language()),
+            ".go": Language(tree_sitter_go.language())
         }
 
         # S-Expressions (запити) для пошуку функцій
@@ -38,8 +22,8 @@ class CodeParser:
                 (class_definition name: (identifier) @name) @def
             """,
             ".kt": """
-                (function_declaration name: (simple_identifier) @name) @def
-                (class_declaration name: (type_identifier) @name) @def
+                (function_declaration name: (identifier) @name) @def
+                (class_declaration name: (identifier) @name) @def
             """,
             ".go": """
                 (function_declaration name: (identifier) @name) @def
@@ -53,8 +37,7 @@ class CodeParser:
         if not lang: return []
 
         # 1. Ініціалізуємо парсер
-        parser = Parser()
-        parser.set_language(lang)
+        parser = Parser(lang)
 
         # 2. Читаємо файл
         try:
@@ -71,15 +54,22 @@ class CodeParser:
         query_scm = self.QUERIES.get(ext)
         if not query_scm: return []
         
-        query = lang.query(query_scm)
-        captures = query.captures(tree.root_node)
+        query = Query(lang, query_scm)
+        cursor = QueryCursor(query)
+        captures_dict = cursor.captures(tree.root_node)
+        
+        # Flatten for compatibility
+        captures = []
+        for name, nodes in captures_dict.items():
+            for node in nodes:
+                captures.append((node, name))
 
         entities = []
         processed = set()
 
         for node, capture_name in captures:
              if capture_name == "def":
-                # Уникаємо дублікатів (бо capture повертає і @name і @def)
+                    # Уникаємо дублікатів (бо capture повертає і @name і @def)
                 if node.start_byte in processed: continue
                 processed.add(node.start_byte)
 

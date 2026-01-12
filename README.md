@@ -114,22 +114,27 @@ If you only need to search an existing index (e.g., on a mobile device) without 
     python3 search_index.py "your query"
     ```
 
-### Making it global (Termux)
-To run the search from any folder:
-1.  Create a link to your `bin` folder:
-    ```bash
-    mkdir -p ~/bin
-    ln -s $(pwd)/search-index ~/bin/search-index
-    ```
-2.  Add `~/bin` to your PATH if not already present.
-    ```bash
-    # Bash/Zsh
-    echo 'export PATH=$HOME/bin:$PATH' >> ~/.bashrc
-    
-    # Fish
-    set -U fish_user_paths $HOME/bin $fish_user_paths
-    ```
-3.  Now you can run `search-index "query"` from anywhere.
+### Making it global (Termux & Linux)
+To run the tools from any folder, run the installation script. It will generate launchers with hardcoded paths and place them in `~/bin` (Termux) or `~/.local/bin` (Linux).
+
+```bash
+./install_tools.sh
+```
+
+Ensure your PATH is configured:
+```bash
+# Bash
+echo 'export PATH=$HOME/bin:$PATH' >> ~/.bashrc  # For Termux
+# echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.bashrc  # For Linux
+
+# Zsh
+echo 'export PATH=$HOME/bin:$PATH' >> ~/.zshrc  # For Termux
+# echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.zshrc  # For Linux
+
+# Fish
+set -gx PATH $HOME/bin $PATH  # For Termux (Universal)
+# set -gx PATH $HOME/.local/bin $PATH # For Linux (Universal)
+```
 
 ## Project Structure
 
@@ -153,8 +158,8 @@ Uses **PyTorch** and `sentence-transformers` for maximum performance.
     embedding: all-MiniLM-L6-v2
   ```
 
-### Mobile (Android via Termux)
-Uses **ONNX Runtime** for low resource consumption.
+### Mobile (Android via Termux) - Search Only
+Due to hardware and library limitations, the Android version works in **Search Only** mode. You cannot index code on the phone; you must transfer a pre-built index from your desktop.
 
 **1. Installation:**
 Termux requires system-level installation for heavy libraries like ONNX Runtime.
@@ -163,24 +168,18 @@ Termux requires system-level installation for heavy libraries like ONNX Runtime.
 # Install system dependencies (including ONNX Runtime)
 pkg install rust clang binutils python-numpy python-onnxruntime
 
-# Create virtual environment with access to system packages
-# (Crucial for accessing the installed onnxruntime)
-python3 -m venv --system-site-packages .venv
-source .venv/bin/activate
+# Run the automated installer
+./install_tools.sh
+```
 
-# Set up environment for compilation (bash/zsh)
-export CARGO_BUILD_TARGET=aarch64-linux-android
-export ANDROID_API_LEVEL=24 
+**2. Setup Data:**
+Copy these folders from your desktop project to the Termux project folder:
+- `.code-index/` (The database)
+- `models/all-MiniLM-L6-v2-onnx/` (The model)
 
-# Set up environment for compilation (fish)
-set -gx CARGO_BUILD_TARGET aarch64-linux-android
-set -gx ANDROID_API_LEVEL 24
-
-# Edit requirements to remove 'onnxruntime' (since we installed it via pkg)
-sed -i '/onnxruntime/d' requirements-android.txt
-
-# Install Python dependencies
-pip install -r requirements-android.txt
+**3. Search:**
+```bash
+search-index "your query"
 ```
 
 **2. Model Setup:**

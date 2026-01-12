@@ -1,4 +1,5 @@
 import os
+import ctypes
 from tree_sitter import Language, Parser
 from .schema import CodeEntity, EntitySummary
 
@@ -10,11 +11,23 @@ class CodeParser:
         if not os.path.exists(lib_path):
             raise FileNotFoundError("Run 'python3 build_langs.py' first!")
 
-        # Завантажуємо мови з нашого файлу
+        # Завантажуємо спільну бібліотеку
+        try:
+            self.lib = ctypes.CDLL(lib_path)
+        except Exception as e:
+            print(f"Error loading {lib_path}: {e}")
+            raise
+
+        # Налаштовуємо типи повернення для функцій мов
+        self.lib.tree_sitter_python.restype = ctypes.c_void_p
+        self.lib.tree_sitter_kotlin.restype = ctypes.c_void_p
+        self.lib.tree_sitter_go.restype = ctypes.c_void_p
+
+        # Завантажуємо мови
         self.LANGUAGES = {
-            ".py": Language(lib_path, "python"),
-            ".kt": Language(lib_path, "kotlin"),
-            ".go": Language(lib_path, "go")
+            ".py": Language(self.lib.tree_sitter_python()),
+            ".kt": Language(self.lib.tree_sitter_kotlin()),
+            ".go": Language(self.lib.tree_sitter_go())
         }
 
         # S-Expressions (запити) для пошуку функцій
@@ -69,10 +82,7 @@ class CodeParser:
                 if node.start_byte in processed: continue
                 processed.add(node.start_byte)
 
-                # Знаходимо ім'я (пошук у дочірніх нодах)
-                # (Тут трохи спрощено: ми шукаємо ноду, яку захопили як @name в цьому ж матчі,
-                # але для MVP можна просто взяти текст з child_by_field_name)
-                
+                # Знаходимо ім'я
                 name_node = node.child_by_field_name("name")
                 symbol = name_node.text.decode("utf8") if name_node else "anon"
                 
@@ -100,7 +110,7 @@ class CodeParser:
         return entities
 
     def _parse_contract(self, text):
-        """Парсинг коментарів (те саме, що було раніше)"""
+        """Парсинг коментарів"""
         lines = text.split('\n')
         responsibility = None
         side_effects = []

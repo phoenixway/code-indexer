@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import os
+import sys
 import numpy as np
 from src import config, storage, parser, intents, ai
 from src.schema import CodeEntity, EntitySummary
@@ -58,19 +59,31 @@ def cmd_summarize(args):
     print(f"🧠 Generating AI summaries for {len(to_process)} entities...")
     engine = ai.AIEngine(load_embedder=False)
     
-    # Тут треба читати сирий файл, щоб дати код LLM. 
-    # В entities.json коду немає (економія місця).
-    for e in to_process:
-        try:
-            with open(e.path, "r", encoding="utf-8") as f:
-                code = f.read() # Спрощено, треба шукати по рядках
-            
-            summary_text = engine.generate_summary(code)
-            e.summary = EntitySummary(text=summary_text, source="llm")
-            e.update_confidence() # Стане medium
-            print(f"Processed {e.symbol}")
-        except Exception as ex:
-            print(f"Error reading {e.path}: {ex}")
+    processed_count = 0
+    try:
+        # Тут треба читати сирий файл, щоб дати код LLM. 
+        # В entities.json коду немає (економія місця).
+        for e in to_process:
+            try:
+                with open(e.path, "r", encoding="utf-8") as f:
+                    code = f.read() # Спрощено, треба шукати по рядках
+                
+                summary_text = engine.generate_summary(code)
+                e.summary = EntitySummary(text=summary_text, source="llm")
+                e.update_confidence() # Стане medium
+                print(f"Processed {e.symbol}")
+                processed_count += 1
+                
+                if processed_count % 10 == 0:
+                    storage.save_entities(entities)
+                    print(f"Saved progress ({processed_count}/{len(to_process)}).")
+
+            except Exception as ex:
+                print(f"Error reading {e.path}: {ex}")
+    except KeyboardInterrupt:
+        print("\nInterrupted. Saving progress...")
+        storage.save_entities(entities)
+        sys.exit(0)
 
     storage.save_entities(entities)
     print("✅ Summarization complete.")

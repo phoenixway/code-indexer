@@ -4,6 +4,8 @@ tree-sitter
 tree-sitter-python
 tree-sitter-kotlin
 tree-sitter-go
+tree-sitter-typescript
+tree-sitter-javascript
 ollama
 argparse
 tqdm

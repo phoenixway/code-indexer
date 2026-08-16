@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import glob
-import math
-import re
 import hashlib
 import json
 import os
@@ -17,7 +14,6 @@ def cmd_scan(args):
     p = parser.CodeParser()
     storage.ensure_index_dir()
 
-    force = getattr(args, "force", False)
     scan_root = os.path.normpath(args.root)
     scan_root_abs = os.path.abspath(scan_root)
     scan_state_file = os.path.join(
@@ -25,8 +21,9 @@ def cmd_scan(args):
         "scan_state.json",
     )
 
+    # Existing entities are kept so a resumed scan can continue where the
+    # previous run stopped. Changed files replace only their own entities.
     entities_map = storage.load_entities()
-    id_migrations = {}
 
     try:
         with open(scan_state_file, "r", encoding="utf-8") as f:
@@ -69,185 +66,19 @@ def cmd_scan(args):
 
         os.replace(tmp_file, scan_state_file)
 
-    def migrate_intent_ids():
-        if not id_migrations:
-            return 0
-
-        intents_list = storage.load_intents()
-        changed = 0
-
-        for intent in intents_list:
-            new_mapped = []
-            seen = set()
-
-            for entity_id in intent.mapped_entities:
-                migrated_id = id_migrations.get(entity_id, entity_id)
-
-                if migrated_id != entity_id:
-                    changed += 1
-
-                if migrated_id not in seen:
-                    seen.add(migrated_id)
-                    new_mapped.append(migrated_id)
-
-            intent.mapped_entities = new_mapped
-
-        if changed:
-            storage.save_intents(intents_list)
-
-        return changed
-
     def checkpoint():
         storage.save_entities(list(entities_map.values()))
-        migrate_intent_ids()
         save_scan_state()
 
-    def entities_for_path(path):
-        normalized = os.path.normpath(path)
-
-        return [
-            entity
-            for entity in entities_map.values()
-            if os.path.normpath(entity.path) == normalized
-        ]
-
     def remove_entities_for_path(path):
-        normalized = os.path.normpath(path)
         stale_ids = [
             entity_id
             for entity_id, entity in entities_map.items()
-            if os.path.normpath(entity.path) == normalized
+            if os.path.normpath(entity.path) == path
         ]
 
         for entity_id in stale_ids:
             entities_map.pop(entity_id, None)
-
-    def entity_start_line(entity):
-        source_range = getattr(entity, "source_range", None)
-
-        if source_range is not None:
-            return source_range.start_line
-
-        try:
-            return int(entity.id.rsplit(":", 1)[1])
-        except (ValueError, IndexError, AttributeError):
-            return None
-
-    def has_enrichment(entity):
-        return bool(
-            entity.summary
-            or entity.responsibility
-            or entity.side_effects
-        )
-
-    def match_old_entity(new_entity, old_entities, used_old_ids):
-        if (
-            new_entity.id in entities_map
-            and new_entity.id not in used_old_ids
-        ):
-            return entities_map[new_entity.id]
-
-        candidates = [
-            old
-            for old in old_entities
-            if old.id not in used_old_ids
-            and old.symbol == new_entity.symbol
-        ]
-
-        if not candidates:
-            return None
-
-        new_qualified = getattr(new_entity, "qualified_name", None)
-
-        if new_qualified:
-            qualified_matches = [
-                old
-                for old in candidates
-                if getattr(old, "qualified_name", None) == new_qualified
-            ]
-
-            if len(qualified_matches) == 1:
-                return qualified_matches[0]
-
-            if qualified_matches:
-                candidates = qualified_matches
-
-        if len(candidates) == 1:
-            return candidates[0]
-
-        new_line = entity_start_line(new_entity)
-
-        if new_line is None:
-            return None
-
-        with_lines = [
-            (old, entity_start_line(old))
-            for old in candidates
-        ]
-        with_lines = [
-            (old, line)
-            for old, line in with_lines
-            if line is not None
-        ]
-
-        if not with_lines:
-            return None
-
-        with_lines.sort(
-            key=lambda item: abs(item[1] - new_line)
-        )
-
-        best_distance = abs(with_lines[0][1] - new_line)
-        best = [
-            old
-            for old, line in with_lines
-            if abs(line - new_line) == best_distance
-        ]
-
-        if len(best) == 1:
-            return best[0]
-
-        return None
-
-    def migrate_enrichment(new_entities, old_entities):
-        used_old_ids = set()
-        migrated = 0
-
-        enriched_old_ids = {
-            entity.id
-            for entity in old_entities
-            if has_enrichment(entity)
-        }
-
-        for new_entity in new_entities:
-            old_entity = match_old_entity(
-                new_entity,
-                old_entities,
-                used_old_ids,
-            )
-
-            if old_entity is None:
-                continue
-
-            used_old_ids.add(old_entity.id)
-
-            if old_entity.id != new_entity.id:
-                id_migrations[old_entity.id] = new_entity.id
-
-            if not has_enrichment(old_entity):
-                continue
-
-            new_entity.summary = old_entity.summary
-            new_entity.responsibility = old_entity.responsibility
-            new_entity.side_effects = list(
-                old_entity.side_effects or []
-            )
-            new_entity.update_confidence()
-            migrated += 1
-
-        unmatched = enriched_old_ids - used_old_ids
-
-        return migrated, unmatched
 
     def path_is_inside_scan_root(path):
         try:
@@ -256,6 +87,10 @@ def cmd_scan(args):
             ) == scan_root_abs
         except ValueError:
             return False
+
+    # --------------------------------------------------------------
+    # Discover supported source files first.
+    # --------------------------------------------------------------
 
     source_files = []
     ignored_dirs = {
@@ -286,18 +121,9 @@ def cmd_scan(args):
 
     print(f"📚 Found {len(source_files)} supported source files.")
 
-    if force:
-        print(
-            "♻️  Force mode: reparsing all files and preserving "
-            "existing semantic enrichment."
-        )
-
     scanned = 0
     skipped = 0
     entities_found = 0
-    migrated_enrichments = 0
-    protected_files = 0
-    protected_enrichments = 0
     checkpoint_interval = 25
 
     try:
@@ -308,39 +134,15 @@ def cmd_scan(args):
                 print(f"⚠️  Hash error {path}: {ex}")
                 continue
 
-            if not force and scan_state.get(path) == digest:
+            if scan_state.get(path) == digest:
                 skipped += 1
                 continue
 
-            old_entities = entities_for_path(path)
-            found = p.parse_file(path)
-
-            if force and old_entities:
-                migrated, unmatched = migrate_enrichment(
-                    found,
-                    old_entities,
-                )
-
-                if unmatched:
-                    protected_files += 1
-                    protected_enrichments += len(unmatched)
-
-                    print(
-                        f"⚠️  [{position}/{len(source_files)}] "
-                        f"{path}: could not safely migrate "
-                        f"{len(unmatched)} enriched entities; "
-                        "keeping old records for this file."
-                    )
-
-                    for old_id in list(id_migrations):
-                        if old_id in {entity.id for entity in old_entities}:
-                            id_migrations.pop(old_id, None)
-
-                    continue
-
-                migrated_enrichments += migrated
-
+            # A changed file must replace all entities produced by its old
+            # version before the new version is indexed.
             remove_entities_for_path(path)
+
+            found = p.parse_file(path)
 
             for entity in found:
                 entities_map[entity.id] = entity
@@ -354,16 +156,11 @@ def cmd_scan(args):
                 f"{path} -> {len(found)} entities"
             )
 
-            if force and old_entities:
-                print(
-                    f"    ↳ preserved {migrated} enriched entities"
-                )
-
             if scanned % checkpoint_interval == 0:
                 checkpoint()
                 print(
                     f"💾 Checkpoint: {scanned} files processed "
-                    "this run."
+                    f"this run."
                 )
 
     except KeyboardInterrupt:
@@ -374,6 +171,11 @@ def cmd_scan(args):
             "to resume."
         )
         return
+
+    # --------------------------------------------------------------
+    # Remove entries for source files that existed during an older scan
+    # but have since been deleted inside this scan root.
+    # --------------------------------------------------------------
 
     deleted_paths = [
         path
@@ -386,33 +188,20 @@ def cmd_scan(args):
         remove_entities_for_path(path)
         scan_state.pop(path, None)
 
-    migrated_intent_refs = migrate_intent_ids()
     checkpoint()
 
     print("\n✅ Scan complete.")
-    print(f"  Source files:             {len(source_files)}")
-    print(f"  Scanned/changed:          {scanned}")
-    print(f"  Unchanged/skipped:        {skipped}")
-    print(f"  Deleted:                  {len(deleted_paths)}")
-    print(f"  New entities read:        {entities_found}")
-    print(f"  Total entities:           {len(entities_map)}")
-
-    if force:
-        print(f"  Enrichments preserved:    {migrated_enrichments}")
-        print(f"  Protected files:          {protected_files}")
-        print(f"  Protected enrichments:    {protected_enrichments}")
-        print(f"  Intent refs migrated:     {migrated_intent_refs}")
-
-        if protected_files:
-            print(
-                "\n⚠️  Some files kept their old structural records "
-                "because enrichment migration was ambiguous."
-            )
+    print(f"  Source files:       {len(source_files)}")
+    print(f"  Scanned/changed:    {scanned}")
+    print(f"  Unchanged/skipped:  {skipped}")
+    print(f"  Deleted:            {len(deleted_paths)}")
+    print(f"  New entities read:  {entities_found}")
+    print(f"  Total entities:     {len(entities_map)}")
 
     print("\n--- Next Recommended Step ---")
-    print("1. Run 'code-indexer summary-status' to verify enrichment.")
-    print("2. Run 'code-indexer status' to inspect structural metadata.")
-    print("3. Run 'code-indexer embed' because entity IDs may have changed.")
+    print("1. Run 'code-indexer intents' if you have documentation in docs/intents/.")
+    print("2. Run 'code-indexer summarize' for richer AI descriptions if desired.")
+    print("3. Run 'code-indexer embed' to create/update search vectors.")
 
 def cmd_intents(args):
     print("📘 Parsing intents from docs/intents/...")
@@ -655,24 +444,20 @@ def _parse_summary_payload(text):
     return payload
 
 
-def _summary_candidates(
-    include_all=False,
-    language=None,
-    path_contains=None,
-):
+def cmd_export_summaries(args):
     entities = list(storage.load_entities().values())
     candidates = []
 
     for entity in entities:
-        if not include_all and entity.summary is not None:
+        if not args.all and entity.confidence != "low":
             continue
 
-        entity_language = getattr(entity, "language", None)
+        language = getattr(entity, "language", None)
 
-        if language and entity_language != language:
+        if args.language and language != args.language:
             continue
 
-        if path_contains and path_contains not in entity.path:
+        if args.path_contains and args.path_contains not in entity.path:
             continue
 
         candidates.append(entity)
@@ -680,18 +465,16 @@ def _summary_candidates(
     def sort_key(entity):
         source_range = getattr(entity, "source_range", None)
         start_line = source_range.start_line if source_range else 0
-
-        return (
-            entity.path,
-            start_line,
-            getattr(entity, "qualified_name", None) or entity.symbol,
-        )
+        return entity.path, start_line, entity.symbol
 
     candidates.sort(key=sort_key)
-    return candidates
+    selected = candidates[:args.limit]
 
+    if not selected:
+        print("Nothing to export.")
+        print("Try --all or adjust --language / --path-contains filters.")
+        return
 
-def _render_summary_batch(entities, max_code_chars):
     lines = [
         "# Code Entity Analysis Batch",
         "",
@@ -717,26 +500,21 @@ def _render_summary_batch(entities, max_code_chars):
         "  }",
         "]",
         "",
-        "Important:",
-        "- Preserve every entity ID exactly.",
-        "- Produce exactly one result object for every supplied entity.",
-        "- If there are no side effects, return an empty array.",
-        "- If a concept is uncertain, omit it rather than guessing.",
+        "If there are no side effects, return an empty array.",
+        "If a concept is uncertain, omit it rather than guessing.",
     ]
 
-    exported_ids = []
-
-    for index, entity in enumerate(entities, start=1):
+    for index, entity in enumerate(selected, start=1):
         try:
             code = _read_entity_code(entity)
         except Exception as ex:
-            print(f"⚠️  Could not read {entity.id}: {ex}")
+            print(f"Warning: could not read {entity.id}: {ex}")
             continue
 
         truncated = False
 
-        if len(code) > max_code_chars:
-            code = code[:max_code_chars]
+        if len(code) > args.max_code_chars:
+            code = code[:args.max_code_chars]
             truncated = True
 
         qualified_name = getattr(entity, "qualified_name", None)
@@ -744,8 +522,6 @@ def _render_summary_batch(entities, max_code_chars):
         language = getattr(entity, "language", None) or "text"
         ast_kind = getattr(entity, "ast_kind", None)
         source_range = getattr(entity, "source_range", None)
-
-        exported_ids.append(entity.id)
 
         lines.extend(
             [
@@ -773,7 +549,7 @@ def _render_summary_batch(entities, max_code_chars):
 
         if truncated:
             lines.append(
-                f"CODE_TRUNCATED: yes, first {max_code_chars} characters"
+                f"CODE_TRUNCATED: yes, first {args.max_code_chars} characters"
             )
         else:
             lines.append("CODE_TRUNCATED: no")
@@ -787,214 +563,23 @@ def _render_summary_batch(entities, max_code_chars):
             ]
         )
 
-    return "\n".join(lines) + "\n", exported_ids
-
-
-def _natural_sort_key(path):
-    filename = os.path.basename(path)
-
-    return [
-        int(part) if part.isdigit() else part.lower()
-        for part in re.split(r"(\d+)", filename)
-    ]
-
-
-def cmd_export_summary_batches(args):
-    candidates = _summary_candidates(
-        include_all=args.all,
-        language=args.language,
-        path_contains=args.path_contains,
-    )
-
-    if not candidates:
-        print("✅ Nothing to export. All matching entities are summarized.")
-        return
-
-    if args.batch_size <= 0:
-        raise ValueError("--batch-size must be greater than zero")
-
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    batch_count = math.ceil(len(candidates) / args.batch_size)
-    manifest_batches = []
-
-    print("--- Summary Batch Export ---")
-    print(f"Entities:      {len(candidates)}")
-    print(f"Batch size:    {args.batch_size}")
-    print(f"Batches:       {batch_count}")
-    print(f"Output:        {args.output_dir}")
-    print()
-
-    for batch_index in range(batch_count):
-        start = batch_index * args.batch_size
-        end = start + args.batch_size
-        batch_entities = candidates[start:end]
-
-        number = batch_index + 1
-        prompt_name = f"{args.prefix}{number}.md"
-        result_name = f"{args.prefix}{number}.json"
-        prompt_path = os.path.join(args.output_dir, prompt_name)
-
-        if os.path.exists(prompt_path) and not args.overwrite:
-            raise FileExistsError(
-                f"{prompt_path} already exists. "
-                "Use --overwrite or choose another output directory."
-            )
-
-        output, entity_ids = _render_summary_batch(
-            batch_entities,
-            args.max_code_chars,
-        )
-
-        with open(prompt_path, "w", encoding="utf-8") as f:
-            f.write(output)
-
-        manifest_batches.append(
-            {
-                "batch": number,
-                "prompt_file": prompt_name,
-                "expected_result_file": result_name,
-                "entity_count": len(entity_ids),
-                "entity_ids": entity_ids,
-            }
-        )
-
-        print(
-            f"  {prompt_name}: {len(entity_ids)} entities "
-            f"→ expected {result_name}"
-        )
-
-    manifest = {
-        "batch_size": args.batch_size,
-        "entity_count": len(candidates),
-        "batch_count": batch_count,
-        "prefix": args.prefix,
-        "language": args.language,
-        "path_contains": args.path_contains,
-        "batches": manifest_batches,
-    }
-
-    manifest_path = os.path.join(
-        args.output_dir,
-        "summary-batches-manifest.json",
-    )
-
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(
-            manifest,
-            f,
-            indent=2,
-            ensure_ascii=False,
-        )
-
-    print()
-    print(f"✅ Exported {batch_count} batches.")
-    print(f"Manifest: {manifest_path}")
-    print()
-    print(
-        "Save web-AI responses beside the prompts using the expected "
-        f"names ({args.prefix}1.json, {args.prefix}2.json, ...)."
-    )
-
-
-def cmd_import_summary_batches(args):
-    pattern = os.path.join(args.input_dir, args.pattern)
-    files = sorted(
-        glob.glob(pattern),
-        key=_natural_sort_key,
-    )
-
-    files = [
-        path
-        for path in files
-        if os.path.basename(path) != "summary-batches-manifest.json"
-    ]
-
-    if not files:
-        print(f"No summary result files matched: {pattern}")
-        return
-
-    print("--- Summary Batch Import ---")
-    print(f"Directory: {args.input_dir}")
-    print(f"Pattern:   {args.pattern}")
-    print(f"Files:     {len(files)}")
-    print()
-
-    succeeded = 0
-    failed = []
-
-    for index, path in enumerate(files, start=1):
-        print(
-            f"=== [{index}/{len(files)}] "
-            f"{os.path.basename(path)} ==="
-        )
-
-        import_args = argparse.Namespace(
-            file=path,
-            dry_run=args.dry_run,
-            overwrite_human=args.overwrite_human,
-        )
-
-        try:
-            cmd_import_summaries(import_args)
-            succeeded += 1
-        except Exception as ex:
-            failed.append((path, str(ex)))
-            print(f"❌ Failed: {ex}")
-
-        print()
-
-    print("--- Batch Import Result ---")
-    print(f"Succeeded: {succeeded}")
-    print(f"Failed:    {len(failed)}")
-
-    if failed:
-        print("\nFailed files:")
-
-        for path, error in failed:
-            print(f"  {path}: {error}")
-
-    if args.dry_run:
-        print("\nDry run only. No entities were modified.")
-    elif succeeded:
-        print("\nRun 'code-indexer summary-status' to inspect remaining work.")
-        print("Run 'code-indexer embed' after finishing imports.")
-
-
-def cmd_export_summaries(args):
-    candidates = _summary_candidates(
-        include_all=args.all,
-        language=args.language,
-        path_contains=args.path_contains,
-    )
-
-    selected = candidates[:args.limit]
-
-    if not selected:
-        print("Nothing to export.")
-        print("All matching entities may already be summarized.")
-        return
-
-    output, exported_ids = _render_summary_batch(
-        selected,
-        args.max_code_chars,
-    )
+    output = "\n".join(lines) + "\n"
 
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:
             f.write(output)
 
-        print(
-            f"✅ Exported {len(exported_ids)} entities "
-            f"to {args.output}"
-        )
+        print(f"✅ Exported {len(selected)} entities to {args.output}")
     else:
         print(output, end="")
 
     remaining = max(0, len(candidates) - len(selected))
 
     if remaining:
-        print(f"Remaining matching entities: {remaining}")
+        print(
+            f"Remaining matching entities: {remaining}. "
+            "Run export-summaries again after importing this batch."
+        )
 
 
 def cmd_import_summaries(args):
@@ -1473,16 +1058,7 @@ def main():
     parser = argparse.ArgumentParser(prog="code-indexer")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    scan_parser = sub.add_parser("scan")
-    scan_parser.add_argument("root")
-    scan_parser.add_argument(
-        "--force",
-        action="store_true",
-        help=(
-            "Reparse all supported files and safely migrate existing "
-            "semantic enrichment to the new structural entities."
-        ),
-    )
+    sub.add_parser("scan").add_argument("root")
     sub.add_parser("intents")
     sub.add_parser("summarize")
     sub.add_parser("embed")
@@ -1515,89 +1091,52 @@ def main():
 
     export_parser = sub.add_parser(
         "export-summaries",
-        help="Export one code-entity batch for manual web-AI analysis.",
+        help="Export code entities for manual web-AI analysis.",
     )
     export_parser.add_argument(
         "--limit",
         type=int,
         default=20,
+        help="Maximum number of entities in one batch.",
     )
-    export_parser.add_argument("--output")
-    export_parser.add_argument("--language")
-    export_parser.add_argument("--path-contains")
+    export_parser.add_argument(
+        "--output",
+        help="Write the generated prompt to this file instead of stdout.",
+    )
+    export_parser.add_argument(
+        "--language",
+        help="Export only entities of this language.",
+    )
+    export_parser.add_argument(
+        "--path-contains",
+        help="Export only entities whose path contains this text.",
+    )
     export_parser.add_argument(
         "--max-code-chars",
         type=int,
         default=8000,
+        help="Maximum source-code characters included per entity.",
     )
     export_parser.add_argument(
         "--all",
         action="store_true",
-    )
-
-    export_batches_parser = sub.add_parser(
-        "export-summary-batches",
-        help="Export all remaining entities into numbered web-AI batches.",
-    )
-    export_batches_parser.add_argument(
-        "--output-dir",
-        default="summary-batches",
-    )
-    export_batches_parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=20,
-    )
-    export_batches_parser.add_argument(
-        "--prefix",
-        default="f",
-    )
-    export_batches_parser.add_argument("--language")
-    export_batches_parser.add_argument("--path-contains")
-    export_batches_parser.add_argument(
-        "--max-code-chars",
-        type=int,
-        default=8000,
-    )
-    export_batches_parser.add_argument(
-        "--all",
-        action="store_true",
-    )
-    export_batches_parser.add_argument(
-        "--overwrite",
-        action="store_true",
+        help="Include already summarized entities too.",
     )
 
     import_parser = sub.add_parser(
         "import-summaries",
-        help="Import one JSON response returned by a web AI chat.",
+        help="Import JSON returned by a web AI chat.",
     )
     import_parser.add_argument("file")
     import_parser.add_argument(
         "--dry-run",
         action="store_true",
+        help="Validate the response without modifying the index.",
     )
     import_parser.add_argument(
         "--overwrite-human",
         action="store_true",
-    )
-
-    import_batches_parser = sub.add_parser(
-        "import-summary-batches",
-        help="Import multiple numbered web-AI summary result files.",
-    )
-    import_batches_parser.add_argument("input_dir")
-    import_batches_parser.add_argument(
-        "--pattern",
-        default="f*.json",
-    )
-    import_batches_parser.add_argument(
-        "--dry-run",
-        action="store_true",
-    )
-    import_batches_parser.add_argument(
-        "--overwrite-human",
-        action="store_true",
+        help="Allow imported AI data to replace human-authored summaries.",
     )
 
     export_intents_parser = sub.add_parser(
@@ -1608,6 +1147,7 @@ def main():
         "--limit",
         type=int,
         default=80,
+        help="Maximum entities included in one intent-discovery batch.",
     )
     export_intents_parser.add_argument("--output")
     export_intents_parser.add_argument("--language")
@@ -1616,14 +1156,17 @@ def main():
         "--max-intents",
         type=int,
         default=12,
+        help="Maximum number of intents requested from the AI.",
     )
     export_intents_parser.add_argument(
         "--include-raw",
         action="store_true",
+        help="Include entities that have not been summarized yet.",
     )
     export_intents_parser.add_argument(
         "--include-code",
         action="store_true",
+        help="Include source code in addition to summaries and metadata.",
     )
     export_intents_parser.add_argument(
         "--max-code-chars",
@@ -1643,6 +1186,7 @@ def main():
     import_intents_parser.add_argument(
         "--overwrite",
         action="store_true",
+        help="Allow web-AI intents to replace an existing intent with the same ID.",
     )
 
     args = parser.parse_args()
@@ -1663,12 +1207,8 @@ def main():
         cmd_summary_status(args)
     elif args.cmd == "export-summaries":
         cmd_export_summaries(args)
-    elif args.cmd == "export-summary-batches":
-        cmd_export_summary_batches(args)
     elif args.cmd == "import-summaries":
         cmd_import_summaries(args)
-    elif args.cmd == "import-summary-batches":
-        cmd_import_summary_batches(args)
     elif args.cmd == "export-intents":
         cmd_export_intents(args)
     elif args.cmd == "import-intents":

@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 
 # --- Configuration ---
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -80,6 +81,9 @@ install_wrapper() {
     local WRAPPER_PATH="$TARGET_BIN/$SCRIPT_NAME"
 
     echo "   -> $SCRIPT_NAME"
+
+    # Remove an old launcher, including a dangling symlink.
+    rm -f "$WRAPPER_PATH"
 
     cat > "$WRAPPER_PATH" <<EOF
 #!/bin/bash

@@ -1,0 +1,766 @@
+#!/usr/bin/env python3
+import argparse
+import hashlib
+import json
+import os
+import sys
+import numpy as np
+from src import config, storage, parser, intents, ai
+from src.schema import CodeEntity, EntitySummary
+
+def cmd_scan(args):
+    print(f"🚀 Scanning {args.root}...")
+
+    p = parser.CodeParser()
+    storage.ensure_index_dir()
+
+    scan_root = os.path.normpath(args.root)
+    scan_root_abs = os.path.abspath(scan_root)
+    scan_state_file = os.path.join(
+        storage.INDEX_DIR,
+        "scan_state.json",
+    )
+
+    # Existing entities are kept so a resumed scan can continue where the
+    # previous run stopped. Changed files replace only their own entities.
+    entities_map = storage.load_entities()
+
+    try:
+        with open(scan_state_file, "r", encoding="utf-8") as f:
+            scan_state = json.load(f)
+
+        if not isinstance(scan_state, dict):
+            scan_state = {}
+    except FileNotFoundError:
+        scan_state = {}
+    except Exception as ex:
+        print(
+            "⚠️  Could not read previous scan state: "
+            f"{ex}. Starting a fresh state."
+        )
+        scan_state = {}
+
+    def file_digest(path):
+        digest = hashlib.sha256()
+
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+
+        return digest.hexdigest()
+
+    def save_scan_state():
+        tmp_file = scan_state_file + ".tmp"
+
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(
+                scan_state,
+                f,
+                indent=2,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+
+        os.replace(tmp_file, scan_state_file)
+
+    def checkpoint():
+        storage.save_entities(list(entities_map.values()))
+        save_scan_state()
+
+    def remove_entities_for_path(path):
+        stale_ids = [
+            entity_id
+            for entity_id, entity in entities_map.items()
+            if os.path.normpath(entity.path) == path
+        ]
+
+        for entity_id in stale_ids:
+            entities_map.pop(entity_id, None)
+
+    def path_is_inside_scan_root(path):
+        try:
+            return os.path.commonpath(
+                [scan_root_abs, os.path.abspath(path)]
+            ) == scan_root_abs
+        except ValueError:
+            return False
+
+    # --------------------------------------------------------------
+    # Discover supported source files first.
+    # --------------------------------------------------------------
+
+    source_files = []
+    ignored_dirs = {
+        ".git",
+        "node_modules",
+        "venv",
+        ".venv",
+        "__pycache__",
+        ".code-index",
+    }
+
+    for root, dirs, files in os.walk(scan_root):
+        dirs[:] = [
+            directory
+            for directory in dirs
+            if directory not in ignored_dirs
+        ]
+
+        for file in files:
+            path = os.path.normpath(os.path.join(root, file))
+            ext = os.path.splitext(path)[1].lower()
+
+            if ext in p.LANGUAGES:
+                source_files.append(path)
+
+    source_files.sort()
+    current_paths = set(source_files)
+
+    print(f"📚 Found {len(source_files)} supported source files.")
+
+    scanned = 0
+    skipped = 0
+    entities_found = 0
+    checkpoint_interval = 25
+
+    try:
+        for position, path in enumerate(source_files, start=1):
+            try:
+                digest = file_digest(path)
+            except Exception as ex:
+                print(f"⚠️  Hash error {path}: {ex}")
+                continue
+
+            if scan_state.get(path) == digest:
+                skipped += 1
+                continue
+
+            # A changed file must replace all entities produced by its old
+            # version before the new version is indexed.
+            remove_entities_for_path(path)
+
+            found = p.parse_file(path)
+
+            for entity in found:
+                entities_map[entity.id] = entity
+
+            scan_state[path] = digest
+            scanned += 1
+            entities_found += len(found)
+
+            print(
+                f"[{position}/{len(source_files)}] "
+                f"{path} -> {len(found)} entities"
+            )
+
+            if scanned % checkpoint_interval == 0:
+                checkpoint()
+                print(
+                    f"💾 Checkpoint: {scanned} files processed "
+                    f"this run."
+                )
+
+    except KeyboardInterrupt:
+        print("\n⏸️  Scan interrupted. Saving progress...")
+        checkpoint()
+        print(
+            "✅ Progress saved. Run the same scan command again "
+            "to resume."
+        )
+        return
+
+    # --------------------------------------------------------------
+    # Remove entries for source files that existed during an older scan
+    # but have since been deleted inside this scan root.
+    # --------------------------------------------------------------
+
+    deleted_paths = [
+        path
+        for path in list(scan_state)
+        if path_is_inside_scan_root(path)
+        and path not in current_paths
+    ]
+
+    for path in deleted_paths:
+        remove_entities_for_path(path)
+        scan_state.pop(path, None)
+
+    checkpoint()
+
+    print("\n✅ Scan complete.")
+    print(f"  Source files:       {len(source_files)}")
+    print(f"  Scanned/changed:    {scanned}")
+    print(f"  Unchanged/skipped:  {skipped}")
+    print(f"  Deleted:            {len(deleted_paths)}")
+    print(f"  New entities read:  {entities_found}")
+    print(f"  Total entities:     {len(entities_map)}")
+
+    print("\n--- Next Recommended Step ---")
+    print("1. Run 'code-indexer intents' if you have documentation in docs/intents/.")
+    print("2. Run 'code-indexer summarize' for richer AI descriptions if desired.")
+    print("3. Run 'code-indexer embed' to create/update search vectors.")
+
+def cmd_intents(args):
+    print("📘 Parsing intents from docs/intents/...")
+    p = intents.IntentParser()
+    items = p.parse_all()
+    
+    # Validation: check if mapped entities exist
+    entities_map = storage.load_entities()
+    valid_intents = []
+    
+    for intent in items:
+        missing = [e for e in intent.mapped_entities if e not in entities_map]
+        if missing:
+            print(f"⚠️  Intent '{intent.id}' maps to unknown entities: {missing}")
+        valid_intents.append(intent)
+        
+    storage.save_intents(valid_intents)
+    print(f"✅ Saved {len(valid_intents)} intents.")
+
+def cmd_summarize(args):
+    # Тільки для low confidence
+    entities_map = storage.load_entities()
+    entities = list(entities_map.values())
+    
+    to_process = [e for e in entities if e.confidence == "low"]
+    if not to_process:
+        print("Nothing to summarize (all entities have medium/high confidence).")
+        return
+
+    print(f"🧠 Generating AI summaries for {len(to_process)} entities...")
+    engine = ai.AIEngine(load_embedder=False)
+    
+    processed_count = 0
+    try:
+        # Тут треба читати сирий файл, щоб дати код LLM. 
+        # В entities.json коду немає (економія місця).
+        for e in to_process:
+            try:
+                with open(e.path, "r", encoding="utf-8") as f:
+                    code = f.read() # Спрощено, треба шукати по рядках
+                
+                summary_text = engine.generate_summary(code)
+                e.summary = EntitySummary(text=summary_text, source="llm")
+                e.update_confidence() # Стане medium
+                print(f"Processed {e.symbol}")
+                processed_count += 1
+                
+                if processed_count % 10 == 0:
+                    storage.save_entities(entities)
+                    print(f"Saved progress ({processed_count}/{len(to_process)}).")
+
+            except Exception as ex:
+                print(f"Error reading {e.path}: {ex}")
+    except KeyboardInterrupt:
+        print("\nInterrupted. Saving progress...")
+        storage.save_entities(entities)
+        sys.exit(0)
+
+    storage.save_entities(entities)
+    print("✅ Summarization complete.")
+    print("\n--- Next Recommended Step ---")
+    print("Run 'code-indexer embed' to update the search index with these new descriptions.")
+
+def cmd_embed(args):
+    print("Geometry is everything. Embedding data...")
+    entities_map = storage.load_entities()
+    intent_list = storage.load_intents()
+
+    engine = ai.AIEngine(load_embedder=True)
+
+    ids = []
+    texts = []
+
+    for intent in intent_list:
+        ids.append(intent.id)
+        texts.append(
+            "\n".join(
+                [
+                    f"Intent: {intent.id}",
+                    f"Description: {intent.description}",
+                ]
+            )
+        )
+
+    for entity in entities_map.values():
+        qualified_name = getattr(entity, "qualified_name", None)
+        language = getattr(entity, "language", None)
+        ast_kind = getattr(entity, "ast_kind", None)
+        parent_symbol = getattr(entity, "parent_symbol", None)
+        source_range = getattr(entity, "source_range", None)
+
+        parts = [
+            f"Code entity: {qualified_name or entity.symbol}",
+            f"Symbol: {entity.symbol}",
+            f"Kind: {entity.type}",
+            f"Path: {entity.path}",
+        ]
+
+        if language:
+            parts.append(f"Language: {language}")
+
+        if ast_kind:
+            parts.append(f"AST kind: {ast_kind}")
+
+        if parent_symbol:
+            parts.append(f"Parent: {parent_symbol}")
+
+        if source_range:
+            parts.append(
+                f"Lines: {source_range.start_line}-{source_range.end_line}"
+            )
+
+        if entity.responsibility:
+            parts.append(f"Responsibility: {entity.responsibility}")
+
+        if entity.summary:
+            parts.append(f"Summary: {entity.summary.text}")
+
+        if entity.side_effects:
+            parts.append(
+                "Side effects: " + "; ".join(entity.side_effects)
+            )
+
+        ids.append(entity.id)
+        texts.append("\n".join(parts))
+
+    if not texts:
+        print("Nothing to embed: no intents or code entities found.")
+        print("Run 'code-indexer scan <path>' first.")
+        return
+
+    print(
+        f"Embedding {len(texts)} documents "
+        f"({len(entities_map)} code entities, "
+        f"{len(intent_list)} intents)..."
+    )
+
+    matrix = engine.embed_texts(texts)
+    storage.save_embeddings(ids, matrix)
+
+    print(f"✅ Embedded {len(texts)} items.")
+    print(f"   Vector dimension: {matrix.shape[1]}")
+
+def cmd_search(args):
+    ids, matrix = storage.load_embeddings()
+    if matrix is None:
+        print("Index empty. Run 'embed'.")
+        return
+        
+    engine = ai.AIEngine(load_embedder=True)
+    q_vec = engine.embed_texts([args.query])[0]
+    
+    # Cosine sim
+    norm_mat = np.linalg.norm(matrix, axis=1)
+    norm_q = np.linalg.norm(q_vec)
+    scores = np.dot(matrix, q_vec) / (norm_mat * norm_q)
+    
+    top_k = scores.argsort()[-5:][::-1]
+    
+    print(f"\n🔍 Results for: '{args.query}'")
+    for idx in top_k:
+        obj_id = ids[idx]
+        score = scores[idx]
+        print(f"[{score:.4f}] {obj_id}")
+
+def cmd_status(args):
+    entities = storage.load_entities().values()
+    intents_list = storage.load_intents()
+    
+    counts = {"low": 0, "medium": 0, "high": 0}
+    for e in entities:
+        counts[e.confidence] += 1
+        
+    print("--- Code Index Status ---")
+    print(f"Intents: {len(intents_list)}")
+    print(f"Entities: {len(entities)}")
+    print(f"  High (Human):   {counts['high']}")
+    print(f"  Medium (LLM):   {counts['medium']}")
+    print(f"  Low (Raw):      {counts['low']}")
+    
+    print("\n--- Recommended Next Step ---")
+    if len(entities) == 0:
+        print("Run 'scan <path>' to index your codebase.")
+    elif counts['low'] > 0:
+        print(f"Run 'summarize' to analyze {counts['low']} new entities.")
+        print("Or run 'embed' if you want to skip AI analysis for now.")
+    elif not os.path.exists(os.path.join(storage.INDEX_DIR, "embeddings.npy")):
+        print("Run 'embed' to build the search index.")
+    else:
+        print("Index is up to date! Try 'search \"your query\"'.")
+
+def _read_entity_code(entity):
+    with open(entity.path, "rb") as f:
+        source_range = getattr(entity, "source_range", None)
+
+        if source_range is None:
+            return f.read().decode("utf-8", errors="replace")
+
+        start = source_range.start_byte
+        length = source_range.end_byte - source_range.start_byte
+
+        f.seek(start)
+        return f.read(length).decode("utf-8", errors="replace")
+
+
+def _parse_summary_payload(text):
+    text = text.strip()
+
+    if text.startswith("```"):
+        lines = text.splitlines()
+
+        if lines:
+            lines = lines[1:]
+
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+
+        text = "\n".join(lines).strip()
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("[")
+        end = text.rfind("]")
+
+        if start == -1 or end == -1 or end <= start:
+            raise
+
+        payload = json.loads(text[start:end + 1])
+
+    if isinstance(payload, dict):
+        if isinstance(payload.get("results"), list):
+            payload = payload["results"]
+        elif isinstance(payload.get("summaries"), list):
+            payload = payload["summaries"]
+
+    if not isinstance(payload, list):
+        raise ValueError("Expected a JSON array of summary objects")
+
+    return payload
+
+
+def cmd_export_summaries(args):
+    entities = list(storage.load_entities().values())
+    candidates = []
+
+    for entity in entities:
+        if not args.all and entity.confidence != "low":
+            continue
+
+        language = getattr(entity, "language", None)
+
+        if args.language and language != args.language:
+            continue
+
+        if args.path_contains and args.path_contains not in entity.path:
+            continue
+
+        candidates.append(entity)
+
+    def sort_key(entity):
+        source_range = getattr(entity, "source_range", None)
+        start_line = source_range.start_line if source_range else 0
+        return entity.path, start_line, entity.symbol
+
+    candidates.sort(key=sort_key)
+    selected = candidates[:args.limit]
+
+    if not selected:
+        print("Nothing to export.")
+        print("Try --all or adjust --language / --path-contains filters.")
+        return
+
+    lines = [
+        "# Code Entity Analysis Batch",
+        "",
+        "Analyze the code entities below.",
+        "",
+        "Use only information supported by the supplied code and structural metadata.",
+        "Do not invent behavior that cannot be reasonably inferred from the code.",
+        "",
+        "For each entity:",
+        "- responsibility: one concise sentence describing its semantic/business responsibility",
+        "- side_effects: externally visible mutations, persistence, I/O, state changes, IPC, navigation, or other important effects",
+        "- concepts: short semantic concepts useful for natural-language code search",
+        "",
+        "Return ONLY valid JSON. No Markdown fences, explanation, or prose outside JSON.",
+        "",
+        "Required format:",
+        "[",
+        "  {",
+        "    \"id\": \"copy the entity ID exactly\",",
+        "    \"responsibility\": \"one concise sentence\",",
+        "    \"side_effects\": [\"effect\"],",
+        "    \"concepts\": [\"concept\", \"concept\"]",
+        "  }",
+        "]",
+        "",
+        "If there are no side effects, return an empty array.",
+        "If a concept is uncertain, omit it rather than guessing.",
+    ]
+
+    for index, entity in enumerate(selected, start=1):
+        try:
+            code = _read_entity_code(entity)
+        except Exception as ex:
+            print(f"Warning: could not read {entity.id}: {ex}")
+            continue
+
+        truncated = False
+
+        if len(code) > args.max_code_chars:
+            code = code[:args.max_code_chars]
+            truncated = True
+
+        qualified_name = getattr(entity, "qualified_name", None)
+        parent_symbol = getattr(entity, "parent_symbol", None)
+        language = getattr(entity, "language", None) or "text"
+        ast_kind = getattr(entity, "ast_kind", None)
+        source_range = getattr(entity, "source_range", None)
+
+        lines.extend(
+            [
+                "",
+                f"## ENTITY {index}",
+                f"ID: {entity.id}",
+                f"SYMBOL: {entity.symbol}",
+                f"QUALIFIED_NAME: {qualified_name or entity.symbol}",
+                f"KIND: {entity.type}",
+                f"LANGUAGE: {language}",
+                f"PATH: {entity.path}",
+            ]
+        )
+
+        if ast_kind:
+            lines.append(f"AST_KIND: {ast_kind}")
+
+        if parent_symbol:
+            lines.append(f"PARENT: {parent_symbol}")
+
+        if source_range:
+            lines.append(
+                f"LINES: {source_range.start_line}-{source_range.end_line}"
+            )
+
+        if truncated:
+            lines.append(
+                f"CODE_TRUNCATED: yes, first {args.max_code_chars} characters"
+            )
+        else:
+            lines.append("CODE_TRUNCATED: no")
+
+        lines.extend(
+            [
+                "",
+                f"~~~~{language}",
+                code,
+                "~~~~",
+            ]
+        )
+
+    output = "\n".join(lines) + "\n"
+
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(output)
+
+        print(f"✅ Exported {len(selected)} entities to {args.output}")
+    else:
+        print(output, end="")
+
+    remaining = max(0, len(candidates) - len(selected))
+
+    if remaining:
+        print(
+            f"Remaining matching entities: {remaining}. "
+            "Run export-summaries again after importing this batch."
+        )
+
+
+def cmd_import_summaries(args):
+    with open(args.file, "r", encoding="utf-8") as f:
+        payload = _parse_summary_payload(f.read())
+
+    entities = storage.load_entities()
+
+    imported = 0
+    unknown = 0
+    invalid = 0
+    protected = 0
+
+    for item in payload:
+        if not isinstance(item, dict):
+            invalid += 1
+            continue
+
+        entity_id = item.get("id")
+        responsibility = item.get("responsibility")
+
+        if not isinstance(entity_id, str) or not entity_id:
+            invalid += 1
+            continue
+
+        if not isinstance(responsibility, str) or not responsibility.strip():
+            invalid += 1
+            print(f"⚠️  Missing responsibility for {entity_id}")
+            continue
+
+        entity = entities.get(entity_id)
+
+        if entity is None:
+            unknown += 1
+            print(f"⚠️  Unknown entity ID: {entity_id}")
+            continue
+
+        if (
+            entity.summary
+            and entity.summary.source == "human"
+            and not args.overwrite_human
+        ):
+            protected += 1
+            print(f"🛡️  Keeping human summary: {entity_id}")
+            continue
+
+        raw_effects = item.get("side_effects", [])
+
+        if not isinstance(raw_effects, list):
+            raw_effects = []
+
+        side_effects = [
+            value.strip()
+            for value in raw_effects
+            if isinstance(value, str) and value.strip()
+        ]
+
+        raw_concepts = item.get("concepts", [])
+
+        if not isinstance(raw_concepts, list):
+            raw_concepts = []
+
+        concepts = [
+            value.strip()
+            for value in raw_concepts
+            if isinstance(value, str) and value.strip()
+        ]
+
+        responsibility = responsibility.strip()
+
+        if not args.dry_run:
+            entity.responsibility = responsibility
+            entity.side_effects = side_effects
+            entity.summary = EntitySummary(
+                text=responsibility,
+                source="llm",
+            )
+
+            if concepts:
+                concept_text = "; ".join(concepts)
+                entity.summary.text = (
+                    f"{responsibility} Concepts: {concept_text}."
+                )
+
+            entity.update_confidence()
+
+        imported += 1
+
+    if not args.dry_run:
+        storage.save_entities(list(entities.values()))
+
+    action = "Would import" if args.dry_run else "Imported"
+
+    print(f"✅ {action}: {imported}")
+    print(f"   Unknown IDs:       {unknown}")
+    print(f"   Invalid entries:   {invalid}")
+    print(f"   Human protected:   {protected}")
+
+    if not args.dry_run and imported:
+        print("\nRun 'code-indexer embed' to rebuild semantic vectors.")
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="code-indexer")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("scan").add_argument("root")
+    sub.add_parser("intents")
+    sub.add_parser("summarize")
+    sub.add_parser("embed")
+    sub.add_parser("search").add_argument("query")
+    sub.add_parser("status")
+
+    export_parser = sub.add_parser(
+        "export-summaries",
+        help="Export code entities for manual web-AI analysis.",
+    )
+    export_parser.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="Maximum number of entities in one batch.",
+    )
+    export_parser.add_argument(
+        "--output",
+        help="Write the generated prompt to this file instead of stdout.",
+    )
+    export_parser.add_argument(
+        "--language",
+        help="Export only entities of this language.",
+    )
+    export_parser.add_argument(
+        "--path-contains",
+        help="Export only entities whose path contains this text.",
+    )
+    export_parser.add_argument(
+        "--max-code-chars",
+        type=int,
+        default=8000,
+        help="Maximum source-code characters included per entity.",
+    )
+    export_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Include already summarized entities too.",
+    )
+
+    import_parser = sub.add_parser(
+        "import-summaries",
+        help="Import JSON returned by a web AI chat.",
+    )
+    import_parser.add_argument("file")
+    import_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate the response without modifying the index.",
+    )
+    import_parser.add_argument(
+        "--overwrite-human",
+        action="store_true",
+        help="Allow imported AI data to replace human-authored summaries.",
+    )
+
+    args = parser.parse_args()
+
+    if args.cmd == "scan":
+        cmd_scan(args)
+    elif args.cmd == "intents":
+        cmd_intents(args)
+    elif args.cmd == "summarize":
+        cmd_summarize(args)
+    elif args.cmd == "embed":
+        cmd_embed(args)
+    elif args.cmd == "search":
+        cmd_search(args)
+    elif args.cmd == "status":
+        cmd_status(args)
+    elif args.cmd == "export-summaries":
+        cmd_export_summaries(args)
+    elif args.cmd == "import-summaries":
+        cmd_import_summaries(args)
+
+if __name__ == "__main__":
+    main()

@@ -2,7 +2,7 @@ import os
 
 from tree_sitter import Language, Parser, Query, QueryCursor
 
-from .schema import CodeEntity, EntitySummary, SourceRange
+from .schema import CodeEntity, EntitySummary
 
 
 class CodeParser:
@@ -13,16 +13,22 @@ class CodeParser:
         import tree_sitter_typescript
         import tree_sitter_javascript
 
+        # --------------------------------------------------------------
+        # Languages
+        # --------------------------------------------------------------
+
         self.LANGUAGES = {
             ".py": Language(tree_sitter_python.language()),
             ".kt": Language(tree_sitter_kotlin.language()),
             ".go": Language(tree_sitter_go.language()),
+
             ".ts": Language(
                 tree_sitter_typescript.language_typescript()
             ),
             ".tsx": Language(
                 tree_sitter_typescript.language_tsx()
             ),
+
             ".js": Language(
                 tree_sitter_javascript.language()
             ),
@@ -30,6 +36,10 @@ class CodeParser:
                 tree_sitter_javascript.language()
             ),
         }
+
+        # --------------------------------------------------------------
+        # Queries
+        # --------------------------------------------------------------
 
         python_query = r"""
             (function_definition
@@ -125,8 +135,10 @@ class CodeParser:
             ".py": python_query,
             ".kt": kotlin_query,
             ".go": go_query,
+
             ".ts": typescript_query,
             ".tsx": typescript_query,
+
             ".js": javascript_query,
             ".jsx": javascript_query,
         }
@@ -142,20 +154,9 @@ class CodeParser:
         if query_scm is None:
             return []
 
-        language_by_extension = {
-            ".py": "python",
-            ".kt": "kotlin",
-            ".go": "go",
-            ".ts": "typescript",
-            ".tsx": "typescript",
-            ".js": "javascript",
-            ".jsx": "javascript",
-        }
-        language = language_by_extension.get(
-            ext,
-            ext.lstrip("."),
-        )
-        normalized_path = os.path.normpath(filepath)
+        # --------------------------------------------------------------
+        # Read source
+        # --------------------------------------------------------------
 
         try:
             with open(filepath, "rb") as f:
@@ -164,12 +165,20 @@ class CodeParser:
             print(f"Read error {filepath}: {e}")
             return []
 
+        # --------------------------------------------------------------
+        # Parse AST
+        # --------------------------------------------------------------
+
         try:
-            source_parser = Parser(lang)
-            tree = source_parser.parse(code_bytes)
+            parser = Parser(lang)
+            tree = parser.parse(code_bytes)
         except Exception as e:
             print(f"Parse error {filepath}: {e}")
             return []
+
+        # --------------------------------------------------------------
+        # Query AST
+        # --------------------------------------------------------------
 
         try:
             query = Query(lang, query_scm)
@@ -179,27 +188,25 @@ class CodeParser:
             print(f"Query error {filepath}: {e}")
             return []
 
-        definition_nodes = sorted(
-            captures_dict.get("def", []),
-            key=lambda node: (
-                node.start_byte,
-                -(node.end_byte - node.start_byte),
-            ),
-        )
-
         entities = []
-        records = []
         processed = set()
 
-        for node in definition_nodes:
-            node_key = (node.start_byte, node.end_byte)
+        # --------------------------------------------------------------
+        # Extract definitions
+        # --------------------------------------------------------------
 
-            if node_key in processed:
+        definition_nodes = captures_dict.get("def", [])
+
+        for node in definition_nodes:
+            key = (node.start_byte, node.end_byte)
+
+            if key in processed:
                 continue
 
-            processed.add(node_key)
+            processed.add(key)
 
             name_node = node.child_by_field_name("name")
+
             if name_node is None:
                 continue
 
@@ -210,90 +217,6 @@ class CodeParser:
 
             if not symbol:
                 continue
-
-            parent_record = None
-            parent_span = None
-
-            for candidate in records:
-                parent_node = candidate["node"]
-
-                contains = (
-                    parent_node.start_byte <= node.start_byte
-                    and parent_node.end_byte >= node.end_byte
-                    and (
-                        parent_node.start_byte != node.start_byte
-                        or parent_node.end_byte != node.end_byte
-                    )
-                )
-
-                if not contains:
-                    continue
-
-                span = (
-                    parent_node.end_byte
-                    - parent_node.start_byte
-                )
-
-                if (
-                    parent_record is None
-                    or span < parent_span
-                ):
-                    parent_record = candidate
-                    parent_span = span
-
-            parent_type = (
-                parent_record["type"]
-                if parent_record is not None
-                else None
-            )
-
-            node_type = node.type
-
-            if node_type in {
-                "method_declaration",
-                "method_definition",
-                "method_signature",
-            }:
-                entity_type = "method"
-            elif (
-                node_type in {
-                    "function_definition",
-                    "function_declaration",
-                }
-                and parent_type in {"class", "interface"}
-            ):
-                entity_type = "method"
-            elif node_type in {
-                "class_definition",
-                "class_declaration",
-                "abstract_class_declaration",
-            }:
-                entity_type = "class"
-            elif node_type == "interface_declaration":
-                entity_type = "interface"
-            elif node_type == "enum_declaration":
-                entity_type = "enum"
-            elif node_type == "type_alias_declaration":
-                entity_type = "type_alias"
-            else:
-                entity_type = "function"
-
-            if parent_record is not None:
-                qualified_name = (
-                    f'{parent_record["qualified_name"]}.{symbol}'
-                )
-                parent_id = parent_record["id"]
-                parent_symbol = parent_record["symbol"]
-            else:
-                qualified_name = symbol
-                parent_id = None
-                parent_symbol = None
-
-            start_line = node.start_point[0] + 1
-            entity_id = (
-                f"{language}:{normalized_path}:"
-                f"{qualified_name}:{start_line}"
-            )
 
             try:
                 full_code = node.text.decode("utf-8")
@@ -312,26 +235,17 @@ class CodeParser:
                     source="human",
                 )
 
-            source_range = SourceRange(
-                start_line=start_line,
-                start_column=node.start_point[1] + 1,
-                end_line=node.end_point[0] + 1,
-                end_column=node.end_point[1] + 1,
-                start_byte=node.start_byte,
-                end_byte=node.end_byte,
-            )
+            entity_type = self._entity_type(node.type)
 
             entity = CodeEntity(
-                id=entity_id,
+                id=self._make_entity_id(
+                    filepath=filepath,
+                    symbol=symbol,
+                    node=node,
+                ),
                 type=entity_type,
-                path=normalized_path,
+                path=filepath,
                 symbol=symbol,
-                language=language,
-                ast_kind=node_type,
-                qualified_name=qualified_name,
-                parent_id=parent_id,
-                parent_symbol=parent_symbol,
-                source_range=source_range,
                 summary=summary_obj,
                 responsibility=responsibility,
                 side_effects=effects,
@@ -341,19 +255,64 @@ class CodeParser:
             entity.update_confidence()
             entities.append(entity)
 
-            records.append(
-                {
-                    "node": node,
-                    "id": entity_id,
-                    "type": entity_type,
-                    "symbol": symbol,
-                    "qualified_name": qualified_name,
-                }
-            )
-
         return entities
 
+    def _entity_type(self, node_type: str) -> str:
+        """
+        Current schema supports only:
+            function
+            class
+            file
+
+        Interface/enum/type alias are temporarily treated as class-like.
+        """
+
+        class_like = {
+            "class_definition",
+            "class_declaration",
+            "interface_declaration",
+            "enum_declaration",
+            "type_alias_declaration",
+        }
+
+        if node_type in class_like:
+            return "class"
+
+        return "function"
+
+    def _make_entity_id(
+        self,
+        filepath: str,
+        symbol: str,
+        node,
+    ) -> str:
+        """
+        Temporary ID.
+
+        Line number avoids collisions between e.g. multiple save()
+        methods in the same file.
+
+        Later this should become a qualified symbol ID.
+        """
+
+        start_line = node.start_point[0] + 1
+
+        return f"{filepath}:{symbol}:{start_line}"
+
     def _parse_contract(self, text: str):
+        """
+        Parse optional human contracts:
+
+            // responsibility: ...
+            // side effect: ...
+
+            # responsibility: ...
+            # side effect: ...
+
+            @responsibility:
+            @side-effect:
+        """
+
         responsibility = None
         side_effects = []
 

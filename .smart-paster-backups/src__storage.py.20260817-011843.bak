@@ -12,14 +12,8 @@ def ensure_index_dir():
 def save_entities(entities: List[CodeEntity]):
     ensure_index_dir()
     data = [e.model_dump(exclude_none=True) for e in entities]
-    tmp_file = ENTITIES_FILE + ".tmp"
-
-    with open(tmp_file, "w", encoding="utf-8") as f:
+    with open(ENTITIES_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
-        f.flush()
-        os.fsync(f.fileno())
-
-    os.replace(tmp_file, ENTITIES_FILE)
 
 def load_entities() -> Dict[str, CodeEntity]:
     if not os.path.exists(ENTITIES_FILE): return {}
